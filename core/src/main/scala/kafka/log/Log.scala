@@ -270,6 +270,16 @@ class Log(val dir: File,
       
     // trim any invalid bytes or partial messages before appending it to the on-disk log
     var validMessages = trimInvalidBytes(messages, appendInfo)
+
+    var decompressedMessages: Array[Message] = null
+    var msgCount = 0
+    if (appendInfo.codec != NoCompressionCodec) {
+      decompressedMessages = validMessages.iterator.map(_.message).toArray
+      msgCount = decompressedMessages.length
+    } else {
+      msgCount = validMessages.iterator.length
+    }
+
     var semAppend: Semaphore = null
     var semAppendNext: Semaphore = null
 
@@ -278,7 +288,7 @@ class Log(val dir: File,
       logAppendSemaphores synchronized {
         // under the lock we just allocate block of offsets to us and obtain our and next thread semaphores
         appendInfo.firstOffset = nextOffsetToAllocate
-        nextOffsetToAllocate += appendInfo.shallowCount
+        nextOffsetToAllocate += msgCount
 
         // get our semaphore to wait on before we can write to log
         semAppend = logAppendSemaphores(logWriteCount % logAppendSemaphores.length)
@@ -291,8 +301,8 @@ class Log(val dir: File,
 
         // protection from eating our own tail. Should be an extremely rare case.
         // If number of writers == total number of semaphore then our semAppend is used by other thread,
-        // so we spin wait for it to complete, before proceeding
-        while (numActiveWriters.get() == logAppendSemaphores.length) {}
+        // so we wait for it to complete, before proceeding
+        while (numActiveWriters.get() == logAppendSemaphores.length) { Thread.sleep(1) }
       }
 
       try {
@@ -300,7 +310,11 @@ class Log(val dir: File,
           // assign offsets to the message set
           val offset = new AtomicLong(appendInfo.firstOffset)
           try {
-            validMessages = validMessages.assignOffsets(offset, appendInfo.codec)
+            if (appendInfo.codec != NoCompressionCodec) {
+              validMessages = ByteBufferMessageSet.assignOffsets(offset, appendInfo.codec, decompressedMessages)
+            } else {
+              validMessages = validMessages.assignOffsets(offset, appendInfo.codec)
+            }
           } catch {
             case e: IOException => throw new KafkaException("Error in validating messages while appending to log '%s'".format(name), e)
           }
